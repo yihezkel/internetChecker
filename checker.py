@@ -87,11 +87,28 @@ def ensure_csv(path: str) -> None:
             writer.writerow(["timestamp", "success", "url"])
 
 
+# In-memory buffer for rows that couldn't be flushed (e.g. file open in Excel)
+_pending_rows: list[list] = []
+
+
+def flush_rows(path: str, rows: list[list]) -> bool:
+    """Try to append *rows* to the CSV. Return True on success."""
+    try:
+        with open(path, "a", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerows(rows)
+        return True
+    except PermissionError:
+        return False
+
+
 def append_result(path: str, timestamp: str, success: bool, url: str) -> None:
-    """Append a single data-point row to the CSV."""
-    with open(path, "a", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow([timestamp, success, url])
+    """Buffer a data-point and flush everything we can to disk."""
+    _pending_rows.append([timestamp, success, url])
+    if flush_rows(path, _pending_rows):
+        _pending_rows.clear()
+    else:
+        print(f"[WARN] File locked — buffered {len(_pending_rows)} row(s) in memory")
 
 
 def alert_sound() -> None:
