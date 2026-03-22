@@ -32,7 +32,7 @@ URLS = [
     "https://www.bing.com",
     "https://www.microsoft.com",
     "https://www.apple.com",
-    "https://www.amazon.com",
+    "https://www.who.int",
     "https://www.cloudflare.com",
     "https://www.wikipedia.org",
     "https://www.github.com",
@@ -40,14 +40,14 @@ URLS = [
     "https://www.reddit.com",
     "https://www.yahoo.com",
     "https://www.facebook.com",
-    "https://www.twitter.com",
+    "https://www.w3.org",
     "https://www.linkedin.com",
     "https://www.instagram.com",
     "https://www.netflix.com",
     "https://www.cnn.com",
     "https://www.bbc.com",
     "https://www.stackoverflow.com",
-    "https://www.mozilla.org",
+    "https://www.archive.org",
 ]
 
 # ── Windows sleep prevention ────────────────────────────────────────────────
