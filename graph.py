@@ -22,44 +22,69 @@ DEFAULT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output.
 def load_data(path: str) -> pd.DataFrame:
     df = pd.read_csv(path, parse_dates=["timestamp"])
     df["success"] = df["success"].astype(str).str.strip().str.lower() == "true"
+    if "protocol" not in df.columns:
+        df["protocol"] = "TCP"
+    df["protocol"] = df["protocol"].fillna("TCP")
     df.sort_values("timestamp", inplace=True)
     df.reset_index(drop=True, inplace=True)
     return df
 
 
 def build_figure(df: pd.DataFrame) -> go.Figure:
+    has_udp = (df["protocol"] == "UDP").any()
+    n_rows = 3 if has_udp else 2
+    row_heights = [0.45, 0.25, 0.3] if has_udp else [0.7, 0.3]
+    subtitles = (
+        ("TCP Status (HTTP)", "UDP Status (DNS)", "Failure Density (rolling 10-min)")
+        if has_udp
+        else ("Internet Status Over Time", "Failure Density (rolling 10-min count)")
+    )
+
     fig = make_subplots(
-        rows=2,
+        rows=n_rows,
         cols=1,
         shared_xaxes=True,
-        vertical_spacing=0.08,
-        row_heights=[0.7, 0.3],
-        subplot_titles=("Internet Status Over Time", "Failure Density (rolling 10-min count)"),
+        vertical_spacing=0.07,
+        row_heights=row_heights,
+        subplot_titles=subtitles,
     )
 
-    # ── Row 1: scatter of each check result ──────────────────────────────────
-    colours = df["success"].map({True: "#2ecc71", False: "#e74c3c"})
-    labels = df["success"].map({True: "UP", False: "DOWN"})
+    # ── Helper to add a status trace ─────────────────────────────────────────
+    def add_status_trace(subset, row, name):
+        colours = subset["success"].map({True: "#2ecc71", False: "#e74c3c"})
+        labels = subset["success"].map({True: "UP", False: "DOWN"})
+        proto = subset["protocol"].iloc[0] if len(subset) else ""
+        fig.add_trace(
+            go.Scatter(
+                x=subset["timestamp"],
+                y=subset["success"].astype(int),
+                mode="markers+lines",
+                marker=dict(color=colours, size=7, line=dict(width=0.5, color="white")),
+                line=dict(color="rgba(127,127,127,0.3)", width=1),
+                text=[
+                    f"{lbl}<br>{proto}: {url}<br>{ts}"
+                    for lbl, url, ts in zip(labels, subset["url"], subset["timestamp"])
+                ],
+                hoverinfo="text",
+                name=name,
+            ),
+            row=row,
+            col=1,
+        )
+        fig.update_yaxes(
+            tickvals=[0, 1], ticktext=["DOWN", "UP"], range=[-0.15, 1.15], row=row, col=1
+        )
 
-    fig.add_trace(
-        go.Scatter(
-            x=df["timestamp"],
-            y=df["success"].astype(int),
-            mode="markers+lines",
-            marker=dict(color=colours, size=7, line=dict(width=0.5, color="white")),
-            line=dict(color="rgba(127,127,127,0.3)", width=1),
-            text=[
-                f"{lbl}<br>{url}<br>{ts}"
-                for lbl, url, ts in zip(labels, df["url"], df["timestamp"])
-            ],
-            hoverinfo="text",
-            name="Check result",
-        ),
-        row=1,
-        col=1,
-    )
+    # ── Status traces ────────────────────────────────────────────────────────
+    tcp_df = df[df["protocol"] == "TCP"]
+    add_status_trace(tcp_df, 1, "TCP")
 
-    # ── Row 2: rolling failure count ─────────────────────────────────────────
+    if has_udp:
+        udp_df = df[df["protocol"] == "UDP"]
+        add_status_trace(udp_df, 2, "UDP")
+
+    # ── Rolling failure count (all protocols) ────────────────────────────────
+    fail_row = n_rows
     df_ts = df.set_index("timestamp")
     failures = (~df_ts["success"]).astype(int)
     rolling_fail = failures.rolling("10min").sum()
@@ -73,26 +98,19 @@ def build_figure(df: pd.DataFrame) -> go.Figure:
             fillcolor="rgba(231,76,60,0.25)",
             name="Failures (10 min)",
         ),
-        row=2,
+        row=fail_row,
         col=1,
     )
 
     # ── Layout polish ────────────────────────────────────────────────────────
-    fig.update_yaxes(
-        tickvals=[0, 1],
-        ticktext=["DOWN", "UP"],
-        range=[-0.15, 1.15],
-        row=1,
-        col=1,
-    )
-    fig.update_yaxes(title_text="Failure count", row=2, col=1)
-    fig.update_xaxes(title_text="Time", row=2, col=1)
+    fig.update_yaxes(title_text="Failure count", row=fail_row, col=1)
+    fig.update_xaxes(title_text="Time", row=fail_row, col=1)
 
     fig.update_layout(
         title="Internet Connectivity Report",
         template="plotly_white",
         hovermode="x unified",
-        height=650,
+        height=700,
         showlegend=False,
         xaxis=dict(
             rangeselector=dict(
