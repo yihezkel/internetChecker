@@ -9,6 +9,7 @@ Usage:
     python checker.py
 """
 
+import collections
 import csv
 import ctypes
 import datetime
@@ -29,6 +30,11 @@ CHECK_INTERVAL_SECONDS = 10
 RETRY_INTERVAL_SECONDS = 3
 REQUEST_TIMEOUT_SECONDS = 5
 OUTPUT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output.csv")
+
+QUARANTINE_FAIL_THRESHOLD = 5      # failures needed to quarantine
+QUARANTINE_WINDOW = 10             # out of last N attempts
+QUARANTINE_PEER_PASS_RATE = 0.70   # peers must be this healthy
+QUARANTINE_HOURS = 6               # hours to bench the endpoint
 
 URLS = [
     "https://www.google.com",
@@ -122,8 +128,7 @@ def ensure_csv(path: str) -> None:
     """Create the CSV with a header row if it doesn't already exist."""
     if not os.path.exists(path):
         with open(path, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(["timestamp", "success", "url", "protocol"])
+            csv.writer(f).writerow(["timestamp", "success", "url", "protocol"])
 
 
 # In-memory buffer for rows that couldn't be flushed (e.g. file open in Excel)
@@ -157,6 +162,70 @@ def alert_sound() -> None:
         time.sleep(0.05)
 
 
+# ── Quarantine tracker ───────────────────────────────────────────────────────
+
+class QuarantineTracker:
+    """Track per-endpoint results and auto-quarantine bad endpoints."""
+
+    def __init__(self):
+        # endpoint_key -> deque of booleans (recent results, newest last)
+        self._history: dict[str, collections.deque] = {}
+        # endpoint_key -> datetime when quarantine expires
+        self._quarantined: dict[str, datetime.datetime] = {}
+
+    def _ensure(self, key: str) -> None:
+        if key not in self._history:
+            self._history[key] = collections.deque(maxlen=QUARANTINE_WINDOW)
+
+    def is_quarantined(self, key: str) -> bool:
+        """Return True if *key* is currently quarantined."""
+        if key not in self._quarantined:
+            return False
+        if datetime.datetime.now() >= self._quarantined[key]:
+            del self._quarantined[key]
+            print(f"[INFO] Quarantine expired for {key}")
+            return False
+        return True
+
+    def record(self, key: str, success: bool, protocol: str) -> None:
+        """Record a result and quarantine the endpoint if warranted."""
+        self._ensure(key)
+        self._history[key].append(success)
+
+        history = self._history[key]
+        if len(history) < QUARANTINE_WINDOW:
+            return
+
+        fail_count = sum(1 for r in history if not r)
+        if fail_count < QUARANTINE_FAIL_THRESHOLD:
+            return
+
+        # Check whether peers of the same protocol are healthy
+        peer_results = []
+        for other_key, other_hist in self._history.items():
+            if other_key == key:
+                continue
+            if not other_key.endswith(f"|{protocol}"):
+                continue
+            if len(other_hist) == 0:
+                continue
+            # Use the last QUARANTINE_WINDOW results (or fewer if not enough)
+            peer_results.append(sum(other_hist) / len(other_hist))
+
+        if not peer_results:
+            return
+
+        avg_peer_pass = sum(peer_results) / len(peer_results)
+        if avg_peer_pass >= QUARANTINE_PEER_PASS_RATE:
+            expires = datetime.datetime.now() + datetime.timedelta(hours=QUARANTINE_HOURS)
+            self._quarantined[key] = expires
+            self._history[key].clear()
+            print(
+                f"[QUARANTINE] {key} benched until {expires.isoformat(timespec='seconds')}"
+                f" ({fail_count}/{QUARANTINE_WINDOW} failed, peers {avg_peer_pass:.0%} healthy)"
+            )
+
+
 # ── Main loop ────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -175,6 +244,7 @@ def main() -> None:
     url_cycle = itertools.cycle(URLS)
     dns_cycle = itertools.cycle(DNS_SERVERS)
     consecutive_failures = 0
+    quarantine = QuarantineTracker()
 
     print(f"[INFO] Logging to {OUTPUT_FILE}")
     print(f"[INFO] Checking every {CHECK_INTERVAL_SECONDS}s (retry {RETRY_INTERVAL_SECONDS}s on failure) — press Ctrl+C to stop.\n")
@@ -182,18 +252,37 @@ def main() -> None:
     while True:
         now = datetime.datetime.now().isoformat(timespec="seconds")
 
-        # TCP check (HTTP GET)
-        url = next(url_cycle)
+        # TCP check (HTTP GET) — skip quarantined endpoints
+        for _ in range(len(URLS)):
+            url = next(url_cycle)
+            tcp_key = f"{url}|TCP"
+            if not quarantine.is_quarantined(tcp_key):
+                break
+        else:
+            url = next(url_cycle)
+            tcp_key = f"{url}|TCP"
+
         tcp_ok = check_tcp(url)
         append_result(OUTPUT_FILE, now, tcp_ok, url, "TCP")
+        quarantine.record(tcp_key, tcp_ok, "TCP")
         tcp_status = "OK" if tcp_ok else "FAIL"
         print(f"[{now}]  {tcp_status:4s}  TCP  {url}")
 
-        # UDP check (DNS query)
-        dns_server, dns_label = next(dns_cycle)
+        # UDP check (DNS query) — skip quarantined endpoints
+        for _ in range(len(DNS_SERVERS)):
+            dns_server, dns_label = next(dns_cycle)
+            target = f"{dns_server} ({dns_label})"
+            udp_key = f"{target}|UDP"
+            if not quarantine.is_quarantined(udp_key):
+                break
+        else:
+            dns_server, dns_label = next(dns_cycle)
+            target = f"{dns_server} ({dns_label})"
+            udp_key = f"{target}|UDP"
+
         udp_ok = check_udp(dns_server)
-        target = f"{dns_server} ({dns_label})"
         append_result(OUTPUT_FILE, now, udp_ok, target, "UDP")
+        quarantine.record(udp_key, udp_ok, "UDP")
         udp_status = "OK" if udp_ok else "FAIL"
         print(f"[{now}]  {udp_status:4s}  UDP  {target}")
 
